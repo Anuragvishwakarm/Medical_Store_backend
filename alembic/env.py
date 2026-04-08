@@ -1,5 +1,7 @@
 import asyncio
 from logging.config import fileConfig
+import os
+from dotenv import load_dotenv
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -11,7 +13,15 @@ from alembic import context
 from app.database import Base
 import app.models  # noqa: F401  — registers all models on Base.metadata
 
-config = context.config
+# ── MUST be in this order ──────────────────────────────────────
+config = context.config          # 1. config pehle
+load_dotenv()                    # 2. .env load karo
+config.set_main_option(          # 3. ab set karo
+    "sqlalchemy.url",
+    os.environ["DATABASE_URL"]
+)
+# ───────────────────────────────────────────────────────────────
+
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

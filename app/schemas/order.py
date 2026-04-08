@@ -60,7 +60,6 @@ class OrderOut(BaseModel):
 
 
 class OrderConfirm(BaseModel):
-    """Payload when confirming a draft order."""
     initial_payment: float = Field(0, ge=0)
-    payment_mode: str = "cash"
+    payment_mode: str = "cash"                   # ← lowercase string
     payment_reference: str | None = None

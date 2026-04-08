@@ -26,9 +26,9 @@ async def create_purchase(payload: PurchaseCreate, db: AsyncSession = Depends(ge
     if existing.scalar_one_or_none():
         raise HTTPException(409, f"Invoice '{payload.invoice_number}' already exists")
 
-    subtotal = 0.0
+    subtotal  = 0.0
     gst_total = 0.0
-    db_items = []
+    db_items  = []
 
     for item in payload.items:
         medicine = await db.get(Medicine, item.medicine_id)
@@ -36,12 +36,12 @@ async def create_purchase(payload: PurchaseCreate, db: AsyncSession = Depends(ge
             raise HTTPException(404, f"Medicine ID {item.medicine_id} not found")
 
         line_subtotal = float(item.purchase_price_per_strip) * item.quantity_strips
-        line_gst = line_subtotal * (float(item.gst_rate) / 100)
-        line_total = line_subtotal + line_gst
-        subtotal += line_subtotal
-        gst_total += line_gst
+        line_gst      = line_subtotal * (float(item.gst_rate) / 100)
+        line_total    = line_subtotal + line_gst
+        subtotal      += line_subtotal
+        gst_total     += line_gst
 
-        # Create batch — stock received
+        # Create batch — available_units = strips × units_per_strip
         available_units = item.quantity_strips * medicine.units_per_strip
         batch = Batch(
             medicine_id=item.medicine_id,
@@ -61,7 +61,6 @@ async def create_purchase(payload: PurchaseCreate, db: AsyncSession = Depends(ge
         pi = PurchaseItem(
             medicine_id=item.medicine_id,
             batch_id=batch.id,
-            batch_number=item.batch_number if hasattr(PurchaseItem, "batch_number") else None,
             quantity_strips=item.quantity_strips,
             purchase_price_per_strip=item.purchase_price_per_strip,
             mrp_per_strip=item.mrp_per_strip,
@@ -77,7 +76,8 @@ async def create_purchase(payload: PurchaseCreate, db: AsyncSession = Depends(ge
         invoice_number=payload.invoice_number,
         supplier_id=payload.supplier_id,
         purchase_date=payload.purchase_date,
-        status=PurchaseStatus.RECEIVED,
+        
+        status=PurchaseStatus.received,
         subtotal=round(subtotal, 2),
         discount_amount=payload.discount_amount,
         gst_amount=round(gst_total, 2),
@@ -106,7 +106,9 @@ async def list_purchases(
     query = select(Purchase)
     if supplier_id:
         query = query.where(Purchase.supplier_id == supplier_id)
-    result = await db.execute(query.order_by(Purchase.purchase_date.desc()).offset(skip).limit(limit))
+    result = await db.execute(
+        query.order_by(Purchase.purchase_date.desc()).offset(skip).limit(limit)
+    )
     return result.scalars().all()
 
 

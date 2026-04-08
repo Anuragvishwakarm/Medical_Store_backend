@@ -6,7 +6,7 @@ from app.models.payment import PaymentMode
 class PaymentCreate(BaseModel):
     order_id: int
     amount: float = Field(..., gt=0)
-    mode: PaymentMode = PaymentMode.CASH
+    mode: PaymentMode = PaymentMode.cash          # ← lowercase
     reference_number: str | None = None
     notes: str | None = None
 

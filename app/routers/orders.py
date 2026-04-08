@@ -7,22 +7,15 @@ from app.database import get_db
 from app.models.order import Order, OrderItem, OrderStatus, PaymentStatus
 from app.models.payment import Payment, PaymentMode
 from app.schemas.order import OrderCreate, OrderOut, OrderConfirm
-from app.services.fefo import get_fefo_batches, commit_fefo_allocation, InsufficientStockError
+from app.services.fefo import get_fefo_batches, InsufficientStockError
 from app.services.utils import generate_order_number, calculate_line_total
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-# ─────────────────────────────────────────────────────────────
-# CREATE DRAFT ORDER
-# ─────────────────────────────────────────────────────────────
+# ── CREATE DRAFT ─────────────────────────────────────────────
 @router.post("/", response_model=OrderOut, status_code=201)
 async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Create a DRAFT order.
-    - FEFO batch allocation is computed and reserved.
-    - Stock is NOT deducted yet (happens on confirm).
-    """
     order_number = generate_order_number()
 
     order = Order(
@@ -34,11 +27,11 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
         doctor_name=payload.doctor_name,
         discount_percent=payload.discount_percent,
         notes=payload.notes,
-        status=OrderStatus.DRAFT,
-        payment_status=PaymentStatus.PENDING,
+        status=OrderStatus.draft,               # ← lowercase
+        payment_status=PaymentStatus.pending,   # ← lowercase
     )
     db.add(order)
-    await db.flush()  # get order.id
+    await db.flush()
 
     subtotal = 0.0
     total_gst = 0.0
@@ -79,11 +72,10 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
             )
             db.add(order_item)
 
-    # Apply order-level discount on top
     order_disc = subtotal * (payload.discount_percent / 100)
     total_discount += order_disc
     total_amount = subtotal - total_discount + total_gst
-    balance = total_amount  # nothing paid yet on draft
+    balance = total_amount
 
     order.subtotal = round(subtotal, 2)
     order.discount_amount = round(total_discount, 2)
@@ -97,65 +89,47 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
     return order
 
 
-# ─────────────────────────────────────────────────────────────
-# CONFIRM ORDER — deducts stock
-# ─────────────────────────────────────────────────────────────
+# ── CONFIRM ───────────────────────────────────────────────────
 @router.post("/{order_id}/confirm", response_model=OrderOut)
 async def confirm_order(
     order_id: int,
     payload: OrderConfirm,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Confirm a DRAFT order:
-    1. Deducts stock from batches (FEFO committed).
-    2. Records initial payment if provided.
-    3. Updates payment_status accordingly.
-    """
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    if order.status != OrderStatus.DRAFT:
+    if order.status != OrderStatus.draft:         # ← lowercase
         raise HTTPException(409, f"Order is already {order.status.value}")
 
-    # Deduct stock for all order items
+    # Deduct stock
+    from app.models.batch import Batch as BatchModel
     for oi in order.items:
-        alloc = [
-            {
-                "batch": await db.get(type("Batch", (), {})(), oi.batch_id) or _get_batch(db, oi.batch_id),
-                "units_to_take": oi.quantity_units,
-            }
-        ]
-        # Direct update without re-computing FEFO (items already allocated)
-        from app.models.batch import Batch as BatchModel
         batch = await db.get(BatchModel, oi.batch_id)
         if batch:
             batch.sold_units += oi.quantity_units
             batch.available_units -= oi.quantity_units
             db.add(batch)
 
-    order.status = OrderStatus.CONFIRMED
+    order.status = OrderStatus.confirmed          # ← lowercase
     order.confirmed_at = datetime.now(timezone.utc)
 
-    # Handle initial payment
     if payload.initial_payment > 0:
-        payment_amount = min(payload.initial_payment, float(order.total_amount))
+        pay_amt = min(payload.initial_payment, float(order.total_amount))
         payment = Payment(
             order_id=order.id,
-            amount=payment_amount,
+            amount=pay_amt,
             mode=PaymentMode(payload.payment_mode),
             reference_number=payload.payment_reference,
         )
         db.add(payment)
-        order.paid_amount = payment_amount
-        order.balance_amount = round(float(order.total_amount) - payment_amount, 2)
-
-        if order.balance_amount <= 0:
-            order.payment_status = PaymentStatus.PAID
-        else:
-            order.payment_status = PaymentStatus.PARTIAL
+        order.paid_amount = pay_amt
+        order.balance_amount = round(float(order.total_amount) - pay_amt, 2)
+        order.payment_status = (
+            PaymentStatus.paid if order.balance_amount <= 0 else PaymentStatus.partial  # ← lowercase
+        )
     else:
-        order.payment_status = PaymentStatus.PENDING
+        order.payment_status = PaymentStatus.pending    # ← lowercase
 
     db.add(order)
     await db.flush()
@@ -163,40 +137,37 @@ async def confirm_order(
     return order
 
 
-# ─────────────────────────────────────────────────────────────
-# CANCEL ORDER
-# ─────────────────────────────────────────────────────────────
+# ── CANCEL ────────────────────────────────────────────────────
 @router.post("/{order_id}/cancel", response_model=OrderOut)
 async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db)):
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    if order.status == OrderStatus.CONFIRMED:
-        raise HTTPException(409, "Confirmed orders cannot be cancelled. Raise a return instead.")
-    order.status = OrderStatus.CANCELLED
+    if order.status == OrderStatus.confirmed:     # ← lowercase
+        raise HTTPException(409, "Confirmed orders cannot be cancelled.")
+    order.status = OrderStatus.cancelled          # ← lowercase
     db.add(order)
     await db.flush()
     await db.refresh(order)
     return order
 
 
-# ─────────────────────────────────────────────────────────────
-# LIST & GET
-# ─────────────────────────────────────────────────────────────
+# ── LIST ──────────────────────────────────────────────────────
 @router.get("/", response_model=list[OrderOut])
 async def list_orders(
-    status: OrderStatus | None = Query(None),
-    payment_status: PaymentStatus | None = Query(None),
+    status: str | None = Query(None),
+    payment_status: str | None = Query(None),
     customer_id: int | None = Query(None),
     skip: int = 0,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
 ):
+    from sqlalchemy import text
     query = select(Order)
     if status:
-        query = query.where(Order.status == status)
+        query = query.where(text(f"orders.status = '{status}'"))
     if payment_status:
-        query = query.where(Order.payment_status == payment_status)
+        query = query.where(text(f"orders.payment_status = '{payment_status}'"))
     if customer_id:
         query = query.where(Order.customer_id == customer_id)
 
@@ -206,14 +177,10 @@ async def list_orders(
     return result.scalars().all()
 
 
+# ── GET ONE ───────────────────────────────────────────────────
 @router.get("/{order_id}", response_model=OrderOut)
 async def get_order(order_id: int, db: AsyncSession = Depends(get_db)):
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     return order
-
-
-async def _get_batch(db, batch_id):
-    from app.models.batch import Batch as BatchModel
-    return await db.get(BatchModel, batch_id)
